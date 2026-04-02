@@ -15,8 +15,15 @@ const accountsRouter = require('./routes/accounts.js')
 const settingsRouter = require('./routes/settings.js')
 
 if (config.dataSaveMode === 'file') {
-  if (!fs.existsSync(path.join(__dirname, '../data/data.json'))) {
-    fs.writeFileSync(path.join(__dirname, '../data/data.json'), JSON.stringify({"accounts": [] }, null, 2))
+  const dataDir = path.join(__dirname, '../data')
+  const dataFile = path.join(dataDir, 'data.json')
+
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true })
+  }
+
+  if (!fs.existsSync(dataFile)) {
+    fs.writeFileSync(dataFile, JSON.stringify({ "accounts": [] }, null, 2))
   }
 }
 

@@ -1,10 +1,10 @@
 <div align="center">
 
-# 🚀 Qwen-Proxy
+# 🚀 Qwen2API
 
 [![Version](https://img.shields.io/badge/version-2026.03.04.10.58-blue.svg)](https://github.com/TheWiseWolfHolo/Qwen2API)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
-[![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://hub.docker.com/r/rfym21/qwen2api)
+[![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://github.com/TheWiseWolfHolo/Qwen2API/tree/main/docker)
 
 [🧭 Maintained by WolfHolo](https://github.com/TheWiseWolfHolo/Qwen2API) | [📖 文档](#api-文档) | [🐳 Docker 部署](#docker-部署)
 
@@ -14,14 +14,15 @@
 
 ### 项目说明
 
-Qwen-Proxy 是一个将 `https://chat.qwen.ai` 和 `Qwen Code / Qwen Cli` 转换为 OpenAI 兼容 API 的代理服务。通过本项目，您只需要一个账户，即可以使用任何支持 OpenAI API 的客户端（如 ChatGPT-Next-Web、LobeChat 等）来调用 `https://chat.qwen.ai` 和 `Qwen Code / Qwen Cli`的各种模型。其中 `/cli` 端点下的模型由 `Qwen Code / Qwen Cli` 提供，支持256k上下文，原生 tools 参数支持
+Qwen2API 是一个由 **WolfHolo 维护** 的 `Qwen / Qwen Code` OpenAI 兼容代理服务。通过本项目，您可以把 `https://chat.qwen.ai` 与 `Qwen Code / Qwen Cli` 暴露为标准 OpenAI 接口，直接接入 ChatGPT-Next-Web、LobeChat、Cherry Studio 等客户端。其中 `/cli` 端点下的模型由 `Qwen Code / Qwen Cli` 提供，支持 256K 上下文与原生 tools 参数。
 
 **主要特性：**
 - 兼容 OpenAI API 格式，无缝对接各类客户端
 - 支持多账户轮询，提高可用性
 - 支持流式/非流式响应
-- 支持多模态（图片识别、图片生成）
+- 支持多模态（图片识别、图片生成、视频生成、图片编辑）
 - 支持智能搜索、深度思考等高级功能
+- 支持 `-thinking` / `-search` / `-image` / `-video` / `-image-edit` 模型后缀
 - 支持 CLI 端点，提供 256K 上下文和工具调用能力
 - 提供 Web 管理界面，方便配置和监控
 
@@ -177,7 +178,25 @@ caches/
 
 ### 🐳 Docker 部署
 
-#### 方式一：直接运行
+> 当前仓库更推荐 **基于本仓库源码自行构建镜像**，避免继续依赖第三方旧镜像。
+
+#### 方式一：本地构建镜像后运行
+
+```bash
+docker build -t wolfholo/qwen2api:latest .
+
+docker run -d \
+  -p 3000:3000 \
+  -e API_KEY=sk-admin123,sk-user456,sk-user789 \
+  -e DATA_SAVE_MODE=none \
+  -e CACHE_MODE=file \
+  -e ACCOUNTS= \
+  -v ./caches:/app/caches \
+  --name qwen2api \
+  wolfholo/qwen2api:latest
+```
+
+#### 方式二：直接运行现成镜像
 
 ```bash
 docker run -d \
@@ -188,14 +207,16 @@ docker run -d \
   -e ACCOUNTS= \
   -v ./caches:/app/caches \
   --name qwen2api \
-  rfym21/qwen2api:latest
+  ghcr.io/thewisewolfholo/qwen2api:latest
 ```
 
-#### 方式二：Docker Compose
+> 如果你的 GHCR 镜像未公开，请改为上一种“本地构建镜像”方式，或替换成你自己的镜像地址。
+
+#### 方式三：Docker Compose
 
 ```bash
 # 下载配置文件
-curl -o docker-compose.yml https://raw.githubusercontent.com/Rfym21/Qwen2API/refs/heads/main/docker/docker-compose.yml
+curl -o docker-compose.yml https://raw.githubusercontent.com/TheWiseWolfHolo/Qwen2API/refs/heads/main/docker/docker-compose.yml
 
 # 启动服务
 docker compose pull && docker compose up -d
@@ -447,7 +468,7 @@ Authorization: Bearer sk-your-api-key
 
 使用 `-image` 模型启用文本到图像生成功能。
 使用 `-image-edit` 模型启用图像修改功能。
-当使用 `-image` 模型时你可以通过在请求体中添加 `size` 参数或在消息内容中包含特定关键词 `1:1`, `4:3`, `3:4`, `16:9`, `9:16` 来控制图片尺寸。
+当使用 `-image` / `-image-edit` 模型时，你可以通过在请求体中添加 `size` 参数，或在提示词中显式写入 `@1:1`、`@4:3`、`@3:4`、`@16:9`、`@9:16` 来控制图片尺寸。当前实现默认尺寸为 **`16:9`**，与 Qwen Web 侧的常见行为保持一致。
 
 ```http
 POST /v1/chat/completions
@@ -465,7 +486,7 @@ Authorization: Bearer sk-your-api-key
       "content": "画一只在花园里玩耍的小猫咪，卡通风格"
     }
   ],
-  "size": "1:1",
+  "size": "16:9",
   "stream": false
 }
 ```
@@ -473,6 +494,27 @@ Authorization: Bearer sk-your-api-key
 **支持的参数:**
 - `size`: 图片尺寸，支持 `"1:1"`、`"4:3"`、`"3:4"`、`"16:9"`、`"9:16"`
 - `stream`: 支持流式和非流式响应
+
+### 🎬 视频生成
+
+使用 `-video` 模型启用文本到视频生成功能。视频生成走异步任务轮询，通常耗时会显著高于图像生成；当上游限流或任务超时时，API 会直接返回显式错误，而不是静默卡住。
+
+```json
+{
+  "model": "qwen-max-latest-video",
+  "messages": [
+    {
+      "role": "user",
+      "content": "一只狼在夜色森林里奔跑，电影感镜头，@16:9"
+    }
+  ],
+  "stream": false
+}
+```
+
+**返回格式：**
+- 成功时返回 `<video>` 标签与可下载链接
+- 失败时返回明确错误信息，方便定位上游限流或任务失败
 
 **响应示例:**
 ```json
@@ -516,6 +558,8 @@ Authorization: Bearer sk-your-api-key
 }
 ```
 
+> 若你发现 `/models` 中没有 `-thinking` 变体，先检查 `SIMPLE_MODEL_MAP=false`；若变体存在但响应里不展示思考内容，再检查 `OUTPUT_THINK=true`。
+
 #### 🔍🧠 组合模式
 
 同时启用搜索和推理功能：
@@ -538,16 +582,16 @@ Authorization: Bearer sk-your-api-key
   "messages": [
     {
       "role": "user",
-      "content": "画一只可爱的小猫咪"
+      "content": "画一只可爱的小猫咪 @16:9"
     }
   ],
-  "size": "1:1"
+  "size": "16:9"
 }
 ```
 
 **支持的图片尺寸:** `1:1`、`4:3`、`3:4`、`16:9`、`9:16`
 
-**智能尺寸识别:** 系统会自动从提示词中识别尺寸关键词并设置对应尺寸
+**智能尺寸识别:** 系统会自动从提示词中识别 `@尺寸` 标记并设置对应尺寸；未显式指定时默认使用 `16:9`
 
 #### 🖼️ 多模态支持
 
