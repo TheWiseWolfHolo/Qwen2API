@@ -4,7 +4,7 @@
 
 [![Version](https://img.shields.io/badge/version-2026.03.04.10.58-blue.svg)](https://github.com/TheWiseWolfHolo/Qwen2API)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
-[![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://github.com/TheWiseWolfHolo/Qwen2API/tree/main/docker)
+[![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://github.com/users/TheWiseWolfHolo/packages/container/package/wolfholo-qwen2api)
 
 [🧭 Maintained by WolfHolo](https://github.com/TheWiseWolfHolo/Qwen2API) | [📖 文档](#api-文档) | [🐳 Docker 部署](#docker-部署)
 
@@ -15,6 +15,8 @@
 ### 项目说明
 
 Qwen2API 是一个由 **WolfHolo 维护** 的 `Qwen / Qwen Code` OpenAI 兼容代理服务。通过本项目，您可以把 `https://chat.qwen.ai` 与 `Qwen Code / Qwen Cli` 暴露为标准 OpenAI 接口，直接接入 ChatGPT-Next-Web、LobeChat、Cherry Studio 等客户端。其中 `/cli` 端点下的模型由 `Qwen Code / Qwen Cli` 提供，支持 256K 上下文与原生 tools 参数。
+
+> 当前仓库是 **WolfHolo 持续维护的 fork**，默认公开镜像为 `ghcr.io/thewisewolfholo/wolfholo-qwen2api:latest`，当前 Zeabur 线上实例也使用这条镜像。
 
 **主要特性：**
 - 兼容 OpenAI API 格式，无缝对接各类客户端
@@ -178,12 +180,12 @@ caches/
 
 ### 🐳 Docker 部署
 
-> 当前仓库更推荐 **基于本仓库源码自行构建镜像**，避免继续依赖第三方旧镜像。
+> 当前仓库更推荐 **基于本仓库源码自行构建镜像**，或直接使用本仓库提供的公开 GHCR 镜像，避免继续依赖第三方旧镜像。
 
 #### 方式一：本地构建镜像后运行
 
 ```bash
-docker build -t wolfholo/qwen2api:latest .
+docker build -t ghcr.io/thewisewolfholo/wolfholo-qwen2api:latest .
 
 docker run -d \
   -p 3000:3000 \
@@ -193,7 +195,7 @@ docker run -d \
   -e ACCOUNTS= \
   -v ./caches:/app/caches \
   --name qwen2api \
-  wolfholo/qwen2api:latest
+  ghcr.io/thewisewolfholo/wolfholo-qwen2api:latest
 ```
 
 #### 方式二：直接运行现成镜像
@@ -207,10 +209,10 @@ docker run -d \
   -e ACCOUNTS= \
   -v ./caches:/app/caches \
   --name qwen2api \
-  ghcr.io/thewisewolfholo/qwen2api:latest
+  ghcr.io/thewisewolfholo/wolfholo-qwen2api:latest
 ```
 
-> 如果你的 GHCR 镜像未公开，请改为上一种“本地构建镜像”方式，或替换成你自己的镜像地址。
+> 当前默认公开镜像就是 `ghcr.io/thewisewolfholo/wolfholo-qwen2api:latest`。如果你要自建，请改为上一种“本地构建镜像”方式，或替换成你自己的镜像地址。
 
 #### 方式三：Docker Compose
 
@@ -221,6 +223,8 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/TheWiseWolfHolo/Qwe
 # 启动服务
 docker compose pull && docker compose up -d
 ```
+
+> 仓库内 `docker/docker-compose.yml` 已同步使用 `ghcr.io/thewisewolfholo/wolfholo-qwen2api:latest`。
 
 ### 📦 本地部署
 
@@ -242,6 +246,12 @@ npm start
 # 开发模式
 npm run dev
 ```
+
+## 🙏 致谢
+
+- 当前仓库由 **WolfHolo** 维护与部署适配。
+- 核心项目基础与最初思路来自原作者仓库 **[Rfym21/Qwen2API](https://github.com/Rfym21/Qwen2API)**。
+- 如果你正在使用本分支，也建议顺手给原作者仓库点个 Star，感谢最初的开源工作。
 
 ### 🚀 PM2 多进程部署
 
