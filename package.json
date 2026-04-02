@@ -15,9 +15,9 @@
     "pm2:monit": "pm2 monit"
   },
   "keywords": [],
-  "author": "",
+  "author": "WolfHolo",
   "license": "ISC",
-  "description": "",
+  "description": "WolfHolo maintained Qwen chat and Qwen Code OpenAI-compatible proxy",
   "dependencies": {
     "ali-oss": "^6.22.0",
     "axios": "^1.11.0",

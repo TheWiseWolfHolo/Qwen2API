@@ -2,11 +2,11 @@
 
 # 🚀 Qwen-Proxy
 
-[![Version](https://img.shields.io/badge/version-2026.03.04.10.58-blue.svg)](https://github.com/Rfym21/Qwen2API)
+[![Version](https://img.shields.io/badge/version-2026.03.04.10.58-blue.svg)](https://github.com/TheWiseWolfHolo/Qwen2API)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://hub.docker.com/r/rfym21/qwen2api)
 
-[🔗 加入交流群](https://t.me/nodejs_project) | [📖 文档](#api-文档) | [🐳 Docker 部署](#docker-部署)
+[🧭 Maintained by WolfHolo](https://github.com/TheWiseWolfHolo/Qwen2API) | [📖 文档](#api-文档) | [🐳 Docker 部署](#docker-部署)
 
 </div>
 
@@ -205,7 +205,7 @@ docker compose pull && docker compose up -d
 
 ```bash
 # 克隆项目
-git clone https://github.com/Rfym21/Qwen2API.git
+git clone https://github.com/TheWiseWolfHolo/Qwen2API.git
 cd Qwen2API
 
 # 安装依赖
@@ -678,3 +678,4 @@ data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288
 
 data: [DONE]
 ```
+

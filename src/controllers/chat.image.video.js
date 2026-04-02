@@ -5,7 +5,375 @@ const accountManager = require('../utils/account.js')
 const { sleep } = require('../utils/tools.js')
 const { generateChatID } = require('../utils/request.js')
 const { getSsxmodItna, getSsxmodItna2 } = require('../utils/ssxmod-manager')
-const { getProxyAgent, getChatBaseUrl, applyProxyToAxiosConfig } = require('../utils/proxy-helper')
+const { getProxyAgent, getChatBaseUrl } = require('../utils/proxy-helper')
+const {
+    buildModernVisionRequestBody,
+    normalizeVisionSize,
+    parseStreamPayloads,
+    extractVisionSignal,
+} = require('../utils/vision-response')
+
+class VisionRequestError extends Error {
+    constructor(message, code = 'VISION_UPSTREAM_ERROR', statusCode = 502) {
+        super(message)
+        this.name = 'VisionRequestError'
+        this.code = code
+        this.statusCode = statusCode
+    }
+}
+
+const buildHeaders = (token, chatBaseUrl) => ({
+    'Authorization': `Bearer ${token}`,
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0',
+    'Connection': 'keep-alive',
+    'Accept': 'application/json',
+    'Accept-Encoding': 'gzip, deflate, br, zstd',
+    'Content-Type': 'application/json',
+    'Timezone': 'Mon Dec 08 2025 17:28:55 GMT+0800',
+    'sec-ch-ua': '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+    'source': 'web',
+    'Version': '0.1.13',
+    'bx-v': '2.5.31',
+    'Origin': chatBaseUrl,
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Dest': 'empty',
+    'Referer': `${chatBaseUrl}/c/guest`,
+    'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Cookie': `ssxmod_itna=${getSsxmodItna()};ssxmod_itna2=${getSsxmodItna2()}`,
+    'X-Accel-Buffering': 'no',
+})
+
+const buildAxiosConfig = (token, chatBaseUrl, responseType = 'stream', timeout = 1000 * 60 * 5) => {
+    const proxyAgent = getProxyAgent()
+    const config = {
+        headers: buildHeaders(token, chatBaseUrl),
+        responseType,
+        timeout,
+    }
+
+    if (proxyAgent) {
+        config.httpsAgent = proxyAgent
+        config.proxy = false
+    }
+
+    return config
+}
+
+const buildOpenAIResponse = (model, content) => ({
+    created: new Date().getTime(),
+    model,
+    choices: [
+        {
+            index: 0,
+            message: {
+                role: 'assistant',
+                content,
+            },
+        },
+    ],
+})
+
+const sendOpenAIResponse = (res, model, content, stream) => {
+    setResponseHeaders(res, stream)
+    const returnBody = buildOpenAIResponse(model, content)
+
+    if (stream) {
+        res.write(`data: ${JSON.stringify(returnBody)}\n\n`)
+        res.write('data: [DONE]\n\n')
+        res.end()
+    } else {
+        res.json(returnBody)
+    }
+}
+
+const formatVisionContent = (chatType, contentUrl) => {
+    if (!contentUrl || typeof contentUrl !== 'string') {
+        throw new VisionRequestError('上游没有返回有效的媒体地址', 'VISION_EMPTY_MEDIA_URL', 502)
+    }
+
+    if (chatType === 't2v') {
+        return `\n<video controls = "controls">\n${contentUrl}\n</video>\n\n[Download Video](${contentUrl})\n`
+    }
+
+    return `![image](${contentUrl})`
+}
+
+const getPromptText = (input) => {
+    if (typeof input === 'string') {
+        return input
+    }
+
+    if (Array.isArray(input)) {
+        return input
+            .filter(item => item.type === 'text')
+            .map(item => item.text || '')
+            .join('')
+    }
+
+    return ''
+}
+
+const extractQuotedImages = (content) => {
+    if (typeof content !== 'string') {
+        return []
+    }
+
+    const matches = [...content.matchAll(/!\[image\]\((.*?)\)/g)]
+    return matches.map(match => match[1]).filter(Boolean)
+}
+
+const normalizeVisionInput = (messages, chatType) => {
+    const safeMessages = Array.isArray(messages) ? messages : []
+    const latestMessage = safeMessages[safeMessages.length - 1]
+    const prompt = getPromptText(latestMessage?.content).trim()
+
+    if (!prompt) {
+        throw new VisionRequestError('图片/视频请求缺少有效提示词', 'VISION_EMPTY_PROMPT', 400)
+    }
+
+    const files = []
+
+    if (chatType === 'image_edit') {
+        for (const message of safeMessages) {
+            if (message?.role === 'assistant') {
+                for (const url of extractQuotedImages(message.content)) {
+                    files.push({ type: 'image', url })
+                }
+            }
+
+            if (Array.isArray(message?.content)) {
+                for (const item of message.content) {
+                    if (item?.type === 'image' && item.image) {
+                        files.push({ type: 'image', url: item.image })
+                    }
+                }
+            }
+        }
+    }
+
+    return {
+        prompt,
+        files,
+    }
+}
+
+const readVisionStreamUntilSignal = (stream, { timeoutMs = 120000 } = {}) => new Promise((resolve, reject) => {
+    const decoder = new TextDecoder('utf-8')
+    let buffer = ''
+    let settled = false
+
+    const finish = (fn, value) => {
+        if (settled) {
+            return
+        }
+
+        settled = true
+        clearTimeout(timer)
+        cleanup()
+        fn(value)
+    }
+
+    const timer = setTimeout(() => {
+        finish(reject, new VisionRequestError('等待上游图片/视频结果超时', 'VISION_WAIT_TIMEOUT', 504))
+    }, timeoutMs)
+
+    const handleFrame = (frame) => {
+        const payloads = parseStreamPayloads(frame)
+        for (const payload of payloads) {
+            const signal = extractVisionSignal(payload)
+            if (signal.type === 'ignore') {
+                continue
+            }
+
+            if (signal.type === 'error') {
+                finish(reject, new VisionRequestError(signal.message, signal.code || 'VISION_UPSTREAM_ERROR', 502))
+                return
+            }
+
+            finish(resolve, signal)
+            return
+        }
+    }
+
+    const onData = (chunk) => {
+        buffer += decoder.decode(chunk, { stream: true })
+
+        const frames = buffer.split(/\n\n/)
+        if (frames.length > 1) {
+            buffer = frames.pop() || ''
+            for (const frame of frames) {
+                handleFrame(frame)
+                if (settled) {
+                    return
+                }
+            }
+        } else {
+            const trimmed = buffer.trim()
+            if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+                handleFrame(trimmed)
+                if (settled) {
+                    return
+                }
+                buffer = ''
+            }
+        }
+    }
+
+    const onError = (error) => {
+        finish(reject, new VisionRequestError(error?.message || '读取上游图片/视频流失败', 'VISION_STREAM_ERROR', 502))
+    }
+
+    const onEnd = () => {
+        if (buffer.trim()) {
+            handleFrame(buffer)
+            if (settled) {
+                return
+            }
+        }
+
+        finish(reject, new VisionRequestError('上游已结束，但未返回可用的图片/视频结果', 'VISION_EMPTY_RESULT', 502))
+    }
+
+    const cleanup = () => {
+        stream.off('data', onData)
+        stream.off('error', onError)
+        stream.off('end', onEnd)
+        stream.off('close', onEnd)
+    }
+
+    stream.on('data', onData)
+    stream.once('error', onError)
+    stream.once('end', onEnd)
+    stream.once('close', onEnd)
+})
+
+const getVisionTaskStatus = async (taskId, token) => {
+    const chatBaseUrl = getChatBaseUrl()
+    const requestConfig = buildAxiosConfig(token, chatBaseUrl, 'json', 60000)
+    const response = await axios.get(`${chatBaseUrl}/api/v1/tasks/status/${taskId}`, requestConfig)
+
+    return {
+        taskStatus: response?.data?.task_status,
+        content: response?.data?.content || '',
+        raw: response?.data,
+    }
+}
+
+const pollVisionTaskContent = async (taskId, token, chatType) => {
+    const maxAttempts = chatType === 't2v' ? 60 : 36
+    const delayMs = chatType === 't2v' ? 10000 : 5000
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+            const status = await getVisionTaskStatus(taskId, token)
+
+            if (status.taskStatus === 'success' && status.content) {
+                return status.content
+            }
+
+            if (['failed', 'error', 'canceled'].includes(status.taskStatus)) {
+                throw new VisionRequestError(`上游任务失败: ${status.taskStatus}`, 'VISION_TASK_FAILED', 502)
+            }
+        } catch (error) {
+            if (error instanceof VisionRequestError) {
+                throw error
+            }
+
+            logger.warn(`轮询任务 ${taskId} 失败，第 ${attempt + 1} 次重试`, 'CHAT', error?.message || error)
+        }
+
+        await sleep(delayMs)
+    }
+
+    throw new VisionRequestError('等待上游异步任务完成超时', 'VISION_TASK_TIMEOUT', 504)
+}
+
+const requestImageGeneration = async ({ token, chatId, model, prompt, size }) => {
+    const chatBaseUrl = getChatBaseUrl()
+    const requestBody = buildModernVisionRequestBody({
+        chatId,
+        model,
+        prompt,
+        chatType: 't2i',
+        size,
+    })
+
+    const requestConfig = buildAxiosConfig(token, chatBaseUrl, 'stream', 1000 * 60 * 5)
+    const response = await axios.post(`${chatBaseUrl}/api/v2/chat/completions?chat_id=${chatId}`, requestBody, requestConfig)
+    const signal = await readVisionStreamUntilSignal(response.data, { timeoutMs: 1000 * 60 * 2 })
+
+    if (signal.type === 'media_url') {
+        return signal.url
+    }
+
+    if (signal.type === 'task_id') {
+        return await pollVisionTaskContent(signal.taskId, token, 't2i')
+    }
+
+    throw new VisionRequestError('图片生成没有返回有效结果', 'VISION_IMAGE_EMPTY', 502)
+}
+
+const requestVideoGeneration = async ({ token, chatId, model, prompt, size }) => {
+    const chatBaseUrl = getChatBaseUrl()
+    const requestBody = {
+        stream: false,
+        chat_id: chatId,
+        model,
+        size,
+        messages: [
+            {
+                role: 'user',
+                content: prompt,
+                files: [],
+                chat_type: 't2v',
+                feature_config: {
+                    output_schema: 'phase',
+                },
+            },
+        ],
+    }
+
+    const requestConfig = buildAxiosConfig(token, chatBaseUrl, 'stream', 1000 * 60 * 5)
+    const response = await axios.post(`${chatBaseUrl}/api/v2/chat/completions?chat_id=${chatId}`, requestBody, requestConfig)
+    const signal = await readVisionStreamUntilSignal(response.data, { timeoutMs: 45000 })
+
+    if (signal.type === 'task_id') {
+        return await pollVisionTaskContent(signal.taskId, token, 't2v')
+    }
+
+    if (signal.type === 'media_url') {
+        return signal.url
+    }
+
+    throw new VisionRequestError('视频生成没有返回有效结果', 'VISION_VIDEO_EMPTY', 502)
+}
+
+const requestImageEdit = async ({ token, chatId, model, prompt, files, size }) => {
+    const chatBaseUrl = getChatBaseUrl()
+    const requestBody = buildModernVisionRequestBody({
+        chatId,
+        model,
+        prompt,
+        chatType: files.length > 0 ? 'image_edit' : 't2i',
+        size,
+        files,
+    })
+
+    const requestConfig = buildAxiosConfig(token, chatBaseUrl, 'stream', 1000 * 60 * 5)
+    const response = await axios.post(`${chatBaseUrl}/api/v2/chat/completions?chat_id=${chatId}`, requestBody, requestConfig)
+    const signal = await readVisionStreamUntilSignal(response.data, { timeoutMs: 1000 * 60 * 2 })
+
+    if (signal.type === 'media_url') {
+        return signal.url
+    }
+
+    if (signal.type === 'task_id') {
+        return await pollVisionTaskContent(signal.taskId, token, 't2i')
+    }
+
+    throw new VisionRequestError('图片编辑没有返回有效结果', 'VISION_IMAGE_EDIT_EMPTY', 502)
+}
 
 /**
  * 主要的聊天完成处理函数
@@ -14,344 +382,46 @@ const { getProxyAgent, getChatBaseUrl, applyProxyToAxiosConfig } = require('../u
  */
 const handleImageVideoCompletion = async (req, res) => {
     const { model, messages, size, chat_type } = req.body
-    // console.log(JSON.stringify(req.body.messages.filter(item => item.role == "user" || item.role == "assistant")))
     const token = accountManager.getAccountToken()
 
-    try {
+    if (!token) {
+        res.status(500).json({ error: '无法获取有效的上游账号令牌' })
+        return
+    }
 
-        // 请求体模板
-        const reqBody = {
-            "stream": false,
-            "chat_id": null,
-            "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "",
-                    "files": [],
-                    "chat_type": chat_type,
-                    "feature_config": {
-                        "output_schema": "phase"
-                    }
-                }
-            ]
+    try {
+        const { prompt, files } = normalizeVisionInput(messages, chat_type)
+        const normalizedSize = normalizeVisionSize({ explicitSize: size, promptText: prompt })
+        const chatId = await generateChatID(token, model)
+
+        if (!chatId) {
+            throw new VisionRequestError('生成 chat_id 失败', 'VISION_CHAT_ID_ERROR', 502)
         }
 
-        const chat_id = await generateChatID(token, model)
+        logger.info(`发送视觉请求: ${chat_type} | size=${normalizedSize}`, 'CHAT')
+        logger.info(`使用提示: ${prompt}`, 'CHAT')
 
-        if (!chat_id) {
-            // 如果生成chat_id失败，则返回错误
-            throw new Error()
+        let contentUrl = null
+        if (chat_type === 't2v') {
+            contentUrl = await requestVideoGeneration({ token, chatId, model, prompt, size: normalizedSize })
+        } else if (chat_type === 'image_edit') {
+            contentUrl = await requestImageEdit({ token, chatId, model, prompt, files, size: normalizedSize })
         } else {
-            reqBody.chat_id = chat_id
+            contentUrl = await requestImageGeneration({ token, chatId, model, prompt, size: normalizedSize })
         }
 
-        // 拿到用户最后一句消息
-        const _userPrompt = messages[messages.length - 1].content
-        if (!_userPrompt) {
-            throw new Error()
-        }
-
-        // 提取历史消息
-        const messagesHistory = messages.filter(item => item.role == "user" || item.role == "assistant")
-        // 聊天消息中所有图片url
-        const select_image_list = []
-
-        // 遍历模型回复消息，拿到所有图片
-        if (chat_type == "image_edit") {
-            for (const item of messagesHistory) {
-                if (item.role == "assistant") {
-                    // 使用matchAll提取所有图片链接
-                    const matches = [...item.content.matchAll(/!\[image\]\((.*?)\)/g)]
-                    // 将所有匹配到的图片url添加到图片列表
-                    for (const match of matches) {
-                        select_image_list.push(match[1])
-                    }
-                } else {
-                    if (Array.isArray(item.content) && item.content.length > 0) {
-                        for (const content of item.content) {
-                            if (content.type == "image") {
-                                select_image_list.push(content.image)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        //分情况处理
-        if (chat_type == 't2i' || chat_type == 't2v') {
-            if (Array.isArray(_userPrompt)) {
-                reqBody.messages[0].content = _userPrompt.map(item => item.type == "text" ? item.text : "").join("\n\n")
-            } else {
-                reqBody.messages[0].content = _userPrompt
-            }
-        } else if (chat_type == 'image_edit') {
-            if (!Array.isArray(_userPrompt)) {
-
-                if (messagesHistory.length === 1) {
-                    reqBody.messages[0].chat_type = "t2i"
-                } else if (select_image_list.length >= 1) {
-                    reqBody.messages[0].files.push({
-                        "type": "image",
-                        "url": select_image_list[select_image_list.length - 1]
-                    })
-                }
-                reqBody.messages[0].content += _userPrompt
-            } else {
-                const texts = _userPrompt.filter(item => item.type == "text")
-                if (texts.length === 0) {
-                    throw new Error()
-                }
-                // 拼接提示词
-                for (const item of texts) {
-                    reqBody.messages[0].content += item.text
-                }
-
-                const files = _userPrompt.filter(item => item.type == "image")
-                // 如果图片为空，则设置为t2i
-                if (files.length === 0) {
-                    reqBody.messages[0].chat_type = "t2i"
-                }
-                // 遍历图片
-                for (const item of files) {
-                    reqBody.messages[0].files.push({
-                        "type": "image",
-                        "url": item.image
-                    })
-                }
-
-            }
-        }
-
-
-        // 处理图片视频尺寸
-        if (chat_type == 't2i' || chat_type == 't2v') {
-            // 获取图片尺寸，优先级 参数 > 提示词 > 默认
-            if (size != undefined && size != null) {
-                reqBody.size = "1:1"
-            } else if (_userPrompt.indexOf("@4:3") != -1) {
-                reqBody.size = "4:3"//"1024*768"
-            } else if (_userPrompt.indexOf("@3:4") != -1) {
-                reqBody.size = "3:4"//"768*1024"
-            } else if (_userPrompt.indexOf("@16:9") != -1) {
-                reqBody.size = "16:9"//"1280*720"
-            } else if (_userPrompt.indexOf("@9:16") != -1) {
-                reqBody.size = "9:16"//"720*1280"
-            }
-        }
-
-        const chatBaseUrl = getChatBaseUrl()
-        const proxyAgent = getProxyAgent()
-
-        logger.info('发送图片视频请求', 'CHAT')
-        logger.info(`选择图片: ${select_image_list[select_image_list.length - 1] || "未选择图片，切换生成图/视频模式"}`, 'CHAT')
-        logger.info(`使用提示: ${reqBody.messages[0].content}`, 'CHAT')
-        // console.log(JSON.stringify(reqBody))
-        const newChatType = reqBody.messages[0].chat_type
-
-        const requestConfig = {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-                "Connection": "keep-alive",
-                "Accept": "application/json",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Content-Type": "application/json",
-                "Timezone": "Mon Dec 08 2025 17:28:55 GMT+0800",
-                "sec-ch-ua": "\"Microsoft Edge\";v=\"143\", \"Chromium\";v=\"143\", \"Not A(Brand\";v=\"24\"",
-                "source": "web",
-                "Version": "0.1.13",
-                "bx-v": "2.5.31",
-                "Origin": chatBaseUrl,
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Dest": "empty",
-                "Referer": `${chatBaseUrl}/c/guest`,
-                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Cookie": `ssxmod_itna=${getSsxmodItna()};ssxmod_itna2=${getSsxmodItna2()}`,
-            },
-            responseType: newChatType == 't2i' ? 'stream' : 'json',
-            timeout: 1000 * 60 * 5
-        }
-
-        // 添加代理配置
-        if (proxyAgent) {
-            requestConfig.httpsAgent = proxyAgent
-            requestConfig.proxy = false
-        }
-
-        const response_data = await axios.post(`${chatBaseUrl}/api/v2/chat/completions?chat_id=${chat_id}`, reqBody, requestConfig)
-
-        try {
-            let contentUrl = null
-            if (newChatType == 't2i') {
-                const decoder = new TextDecoder('utf-8')
-                response_data.data.on('data', async (chunk) => {
-                    const data = decoder.decode(chunk, { stream: true }).split('\n').filter(item => item.trim() != "")
-                    console.log(data)
-                    for (const item of data) {
-                        const jsonObj = JSON.parse(item.replace("data:", '').trim())
-                        if (jsonObj && jsonObj.choices && jsonObj.choices[0] && jsonObj.choices[0].delta && jsonObj.choices[0].delta.content.trim() != "" && contentUrl == null) {
-                            contentUrl = jsonObj.choices[0].delta.content
-                        }
-                    }
-                })
-
-                response_data.data.on('end', () => {
-                    return returnResponse(res, model, contentUrl, req.body.stream)
-                })
-            } else if (newChatType == 'image_edit') {
-                console.log(response_data.data)
-                contentUrl = response_data.data?.data?.choices[0]?.message?.content[0]?.image
-                return returnResponse(res, model, contentUrl, req.body.stream)
-            } else if (newChatType == 't2v') {
-                return handleVideoCompletion(req, res, response_data.data, token)
-            }
-
-        } catch (error) {
-            logger.error('图片处理错误', 'CHAT', error)
-            res.status(500).json({ error: "服务错误!!!" })
-        }
-
+        const content = formatVisionContent(chat_type, contentUrl)
+        sendOpenAIResponse(res, model, content, req.body.stream)
     } catch (error) {
-        res.status(500).json({
-            error: "服务错误，请稍后再试"
-        })
-    }
-}
+        const statusCode = error instanceof VisionRequestError ? error.statusCode : 500
+        const code = error instanceof VisionRequestError ? error.code : 'VISION_UNKNOWN_ERROR'
+        const message = error?.message || '服务错误，请稍后再试'
 
-/**
- * 返回响应
- * @param {*} res 
- * @param {*} model 
- * @param {*} contentUrl 
- */
-const returnResponse = (res, model, contentUrl, stream) => {
-    setResponseHeaders(res, stream)
-    logger.info(`返回响应: ${contentUrl}`, 'CHAT')
-
-    const returnBody = {
-        "created": new Date().getTime(),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": `![image](${contentUrl})`
-                }
-            }
-        ]
-    }
-
-    if (stream) {
-        res.write(`data: ${JSON.stringify(returnBody)}\n\n`)
-        res.write(`data: [DONE]\n\n`)
-        res.end()
-    } else {
-        res.json(returnBody)
-    }
-}
-
-const handleVideoCompletion = async (req, res, response_data, token) => {
-    try {
-        const videoTaskID = response_data?.data?.messages[0]?.extra?.wanx?.task_id
-        if (!response_data || !response_data.success || !videoTaskID) {
-            throw new Error()
-        }
-
-        logger.info(`视频任务ID: ${videoTaskID}`, 'CHAT')
-        const returnBody = {
-            "id": `chatcmpl-${new Date().getTime()}`,
-            "object": "chat.completion.chunk",
-            "created": new Date().getTime(),
-            "model": response_data.data.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": ""
-                    },
-                    "finish_reason": null
-                }
-            ]
-        }
-
-        // 设置尝试次数
-        const maxAttempts = 60
-        // 设置每次请求的间隔时间
-        const delay = 20 * 1000
-        // 循环尝试获取任务状态
-        for (let i = 0; i < maxAttempts; i++) {
-            const content = await getVideoTaskStatus(videoTaskID, token)
-            if (content) {
-                returnBody.choices[0].message.content = `
-<video controls = "controls">
-${content}
-</video>
-
-[Download Video](${content})
-`
-                // 设置响应头
-                setResponseHeaders(res, req.body.stream)
-
-                if (req.body.stream) {
-                    res.write(`data: ${JSON.stringify(returnBody)}\n\n`)
-                    res.write(`data: [DONE]\n\n`)
-                    res.end()
-                } else {
-                    res.json(returnBody)
-                }
-                return
-            } else if (content == null && req.body.stream) {
-                // 发送空数据保活
-                res.write(`data: ${JSON.stringify(returnBody)}\n\n`)
-            }
-
-            await sleep(delay)
-        }
-    } catch (error) {
-        logger.error('获取视频任务状态失败', 'CHAT', error)
-        res.status(500).json({ error: error.response_data?.data?.code || "可能该帐号今日生成次数已用完" })
-    }
-}
-
-const getVideoTaskStatus = async (videoTaskID, token) => {
-    try {
-        const chatBaseUrl = getChatBaseUrl()
-        const proxyAgent = getProxyAgent()
-
-        const requestConfig = {
-            headers: {
-                "Authorization": `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                ...(getSsxmodItna() && { 'Cookie': `ssxmod_itna=${getSsxmodItna()};ssxmod_itna2=${getSsxmodItna2()}` })
-            }
-        }
-
-        // 添加代理配置
-        if (proxyAgent) {
-            requestConfig.httpsAgent = proxyAgent
-            requestConfig.proxy = false
-        }
-
-        const response_data = await axios.get(`${chatBaseUrl}/api/v1/tasks/status/${videoTaskID}`, requestConfig)
-
-        if (response_data.data?.task_status == "success") {
-            logger.info('获取视频任务状态成功', 'CHAT', response_data.data?.content)
-            return response_data.data?.content
-        }
-        logger.info(`获取视频任务 ${videoTaskID} 状态: ${response_data.data?.task_status}`, 'CHAT')
-        return null
-    } catch (error) {
-        console.log(error.response.data)
-        return null
+        logger.error(`视觉请求失败 [${code}] ${message}`, 'CHAT', '', error)
+        res.status(statusCode).json({ error: message, code })
     }
 }
 
 module.exports = {
-    handleImageVideoCompletion
+    handleImageVideoCompletion,
 }

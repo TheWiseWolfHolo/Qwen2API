@@ -67,13 +67,13 @@ const serverInfo = {
 if (config.listenAddress) {
   app.listen(config.listenPort, config.listenAddress, () => {
     logger.server('服务器启动成功', 'SERVER', serverInfo)
-    logger.info('开源地址: https://github.com/Rfym21/Qwen2API', 'INFO')
-    logger.info('电报群聊: https://t.me/nodejs_project', 'INFO')
+    logger.info('Project: https://github.com/TheWiseWolfHolo/Qwen2API', 'INFO')
+    logger.info('Maintainer: WolfHolo', 'INFO')
   })
 } else {
   app.listen(config.listenPort, () => {
     logger.server('服务器启动成功', 'SERVER', serverInfo)
-    logger.info('开源地址: https://github.com/Rfym21/Qwen2API', 'INFO')
-    logger.info('电报群聊: https://t.me/nodejs_project', 'INFO')
+    logger.info('Project: https://github.com/TheWiseWolfHolo/Qwen2API', 'INFO')
+    logger.info('Maintainer: WolfHolo', 'INFO')
   })
 }
